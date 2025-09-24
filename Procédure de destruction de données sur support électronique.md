@@ -234,7 +234,7 @@ afin de sortir le système de veille, il sera souvent nécessaire d'appuyer sur 
 
 Si vous avez accès au disque et qu'il n'est pas gelé, nous pouvons alors lancer le protocole suivant :
 
-## Protocole secure erase sur SATA
+## Protocole secure erase et sanitize sur SATA
 
 ### Effacement
 
@@ -254,6 +254,18 @@ sudo hdparm --user-master u --security-erase-enhanced p /dev/sdX (si supporté p
 sudo hdparm --user-master m --security-disable PASS /dev/sdX (désactiver le mot de passe)
 ```
 
+Pour un SSD SATA, on utilise souvent hdparm avec une option de sanitize spécifique selon la version :
+
+```bash
+sudo hdparm --yes-i-know-what-i-am-doing --sanitize-block-erase /dev/sdX
+```
+
+ou pour un effacement cryptographique :
+
+```bash
+sudo hdparm --yes-i-know-what-i-am-doing --sanitize-crypto-scramble /dev/sdX
+```
+
 ### Vérification
 
 ```bash
@@ -268,7 +280,7 @@ Nous pourrons valider l'effacement si les résultat de cette commande donnent to
 5242880 bytes (5.2 MB, 5.0 MiB) copied, 0.000025 s, 209 MB/s
 ```
 
-## Protocole secure erase sur NVME
+## Protocole secure erase et sanitize sur NVME
 
 ### Effacement
 
@@ -279,6 +291,14 @@ sudo nvme format /dev/nvmeXnY --ses=2 (Si le disque prend en charge crypto-erase
 ```bash
 sudo nvme format /dev/nvmeXnY --ses=1 (Si le disque ne prend pas en charge crypto-erase)
 ```
+
+Pour un SSD NVMe, la commande Linux classique est via l’outil nvme-cli avec la commande :
+
+```bash
+sudo nvme sanitize /dev/nvmeXnY
+```
+
+Cette commande lance l’opération de sanitize qui efface toutes les données de manière sécurisée en utilisant la méthode prise en charge par le disque (block erase, crypto erase, etc.).
 
 Vérification
 
