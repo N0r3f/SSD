@@ -308,6 +308,125 @@ sudo nvme list
 
 Cette commande doit retourner une liste n'affichant pas le support effacé. L'absence du support dans la liste valide son effacement.
 
+## Protocole TRIM sur SATA
+
+### Vérification de TRIM
+
+Il est impératif de vérifier que le SSD SATA supporte TRIM avant d'appliquer ce protocole.
+
+```bash
+sudo hdparm -I /dev/sdX | grep -i trim
+```
+
+Le retour doit indiquer :
+
+```bash
+Data Set Management TRIM supported (limit 1 block)
+```
+
+et idéalement :
+
+```bash
+Deterministic read data after TRIM
+```
+
+Si ces lignes sont absentes, ce protocole ne s'applique pas.
+
+### Activation du support TRIM
+
+Installer fstrim si nécessaire (Adapter à la branche Linux, ici Debian) :
+
+```bash
+sudo apt update
+sudo apt install util-linux
+```
+
+Vérifier la présence :
+
+```bash
+fstrim -V
+```
+
+### Protocole TRIM (SSD déjà utilisé)
+
+Ce protocole s'applique lorsque les commandes Security/Sanitize sont indisponibles.
+
+Démonter toutes les partitions du SSD
+
+Recréer une table de partitions couvrant tout le disque (GPT + 1 partition de données)
+
+Créer un système de fichiers TRIM-compatible :
+
+```bash
+sudo mkfs.ext4 -E discard /dev/sdX1
+```
+
+Monter la partition :
+
+```bash
+sudo mkdir /mnt/ssd
+sudo mount /dev/sdX1 /mnt/ssd
+```
+
+Lancer un TRIM global :
+
+```bash
+sudo fstrim -av
+```
+
+La sortie doit afficher les octets trimmed pour le SSD.
+
+Démonter :
+
+```bash
+sudo umount /mnt/ssd
+```
+
+**Variante stricte (remplissage + TRIM) :**
+
+```bash
+sudo dd if=/dev/zero of=/mnt/ssd/fill.tmp bs=1M status=progress
+rm /mnt/ssd/fill.tmp
+sudo fstrim -av
+```
+
+**Protocole TRIM (SSD propre/affecté)**
+
+Vérifier TRIM via 
+
+```bash
+hdparm -I /dev/sdX
+```
+
+Créer table de partitions + système de fichiers
+
+```bash
+sudo mkfs.ext4 -E discard /dev/sdX1
+sudo mount /dev/sdX1 /mnt/tmp
+```
+
+Monter et lancer immédiatement :
+
+```bash
+sudo fstrim -av
+```
+
+Contrôler l'absence de données lisibles :
+
+```bash
+sudo dd if=/dev/sdX bs=1M count=5 | hexdump -C | head
+```
+
+**Les données doivent apparaître aléatoires/non interprétables.**
+
+En cas d'échec de fstrim, utiliser l'alternative :
+
+```bash
+sudo blkdiscard /dev/sdX
+```
+
+(ATTENTION : destructif, disque non monté)
+
 ## HPA et DCO sur SATA
 
 ### Vérification de la HPA
@@ -367,7 +486,9 @@ Selon les instructions, vous ajoutez le commutateur suivant "J'accepte les cons�
 sudo hdparm --yes-i-know-what-i-am-doing --dco-restore /dev/sdX
 ```
 
-## L'exception sb[ ] 
+## Exceptions
+
+### L'exception sb[ ] 
 
 En cas d'erreur sb[]array, il convient de bien identifier le périphérique et de télécharger l'outil suivant :
 
@@ -384,3 +505,237 @@ sudo sg_decode_sense [le code hexa]
 ```
 
 Ceci rendra le code erreur compréhensible.
+
+### L'exception secure-erase indisponible
+
+Sur certains modèles de SSD, le bloc "Security" est indisponible. Plusieurs firmware de SSD d'entrée de gamme n'exposent pas les commandes ATA Security de façon standard.
+Dans ces cas, les commandes `--security-erase` de hdparm ne sont pas utilisables, même si le disque fonctionne normalement pour le stockage.
+
+Sur SSD, si le contrôleur supporte TRIM et un mode de lecture  déterministe après TRIM (DRAT/DZAT), un effacement logique via TRIM  suffit généralement à rendre les anciennes données inaccessibles.
+ Il est possible de vérifier la prise en charge de TRIM sur `/dev/sdx` avec une commande de type 
+
+```bash
+hdparm -I /dev/sdx | grep -i trim
+```
+
+Si TRIM est listé et que le contrôleur indique DRAT ou DZAT, un TRIM global (par exemple via formatage ou outil dédié) est considéré comme suffisant pour l’effacement et il suffit de suivre la procédure Protocole TRIM sur SATA disponible plus haut dans le document. 
+
+### L'exception sanitize refusé
+
+Le message « SANITIZE feature set is not supported » indique que le  firmware ne gère pas le jeu de commandes ATA Sanitize, même si certains SSD récents le proposent.
+
+exemple : 
+
+```bash
+sudo hdparm --yes-i-know-what-i-am-doing --sanitize-block-erase /dev/sda
+------------------------------------------------------------------------
+/dev/sda:
+SANITIZE feature set is not supported
+```
+
+Vérifier les capacités Security et TRIM 
+
+```bash
+sudo hdparm -I /dev/sdX
+```
+
+Le retour doit confirmer la présence du bloc `Security:` avec `supported`, `not enabled`, `not locked`, `not frozen`, `supported: enhanced erase`et la présence de `Data Set Management TRIM supported`
+
+Vérifier que le disque n’est pas en mode frozen (sinon appliquer la  procédure « Sortir le support du mode frozen » déjà décrite plus haut dans le document).
+Utiliser le protocole Security ERASE (classique) à la place de Sanitize.
+
+Une fois l’opération terminée, vérifier que le bloc Security indique à nouveau `not enabled` et `not locked` dans `hdparm -I /dev/sdX`
+
+Compléter par un effacement logique global via TRIM, afin de s’assurer que toutes les LBA utilisateur sont désallouées par le contrôleur, dans la mesure où TRIM est supporté.
+
+### L'exception « sanitize supporté mais erreur en cours d’exécution »
+
+Ce comportement est typique des SSD d’entrée de gamme (firmware limité mais Sanitize annoncé).
+
+Cela se produit lorsque `hdparm -I /dev/sdX` annonce `*SANITIZE feature set` et `* BLOCK_ERASE_EXT command`, mais la commande `--sanitize-block-erase` démarre l’opération en arrière-plan (« Operation started in background ») puis rend le disque illisible (`dd: error reading '/dev/sda': Input/output error`).
+
+**Cette exception s’applique lorsque :**
+
+- Le SSD supporte Sanitize et indique des durées pour SECURITY ERASE/ENHANCED (ici 2min chacun).
+- La commande sanitize débute mais bloque l’accès au disque pendant son exécution.
+- `hdparm -I` retourne des erreurs SG_IO après lancement.
+
+Vérifier le status sanitize en cours :
+
+```bash
+sudo hdparm --yes-i-know-what-i-am-doing --sanitize-status /dev/sdX
+```
+
+- Si « Operation in progress » ou pourcentage : **attendre la fin** (ici ~2min max selon firmware).
+- Si « No operation in progress » mais disque bloqué : passer à l’étape suivante.
+
+Si bloqué >10min, forcer interruption via veille :
+
+```bash
+sudo chown $USER:$USER /sys/power/state
+sudo echo -n mem > /sys/power/state
+```
+
+(Réveiller via bouton power, puis re-vérifier `hdparm -I /dev/sdX`).
+
+**Compléter par un Secure Erase si sanitize échoue**
+
+Si sanitize ne se termine pas ou rend le disque inutilisable :
+
+Vérifier que Security n’est pas frozen :
+
+```bash
+sudo hdparm -I /dev/sdX | grep -i frozen
+```
+
+(Si frozen, appliquer procédure « Sortir le support du mode frozen »).
+
+Après Security Erase, vérifier accès et état :
+
+```bash
+sudo hdparm -I /dev/sdX
+sudo dd if=/dev/sdX bs=1M count=5 | hexdump -C | head
+```
+
+`dd` doit réussir (données aléatoires/non-intelligibles).
+
+Security doit être `not enabled/not locked/not frozen`.
+
+Si accès toujours impossible :
+
+- Redémarrer le système.
+- Vérifier détection via `lsscsi` ou `lsblk`.
+- Si disque « mort » : appliquer protocole TRIM ou écriture complète manuelle.
+
+**Protocole de fallback (TRIM + remplissage)**
+
+Si les deux méthodes (sanitize + security) échouent, créer table partitions + ext4 :
+
+```bash
+sudo mkfs.ext4 -E discard /dev/sdX1
+sudo mount /dev/sdX1 /mnt/tmp
+```
+
+Remplir + TRIM :
+
+```bash
+sudo dd if=/dev/zero of=/mnt/tmp/fill.tmp bs=1G status=progress
+sudo rm /mnt/tmp/fill.tmp
+sudo fstrim -av /mnt/tmp
+sudo umount /mnt/tmp
+```
+
+**Remarques importantes**
+
+- **Toujours attendre** le sanitize background (ici TS240GSSD220S peut prendre >2min malgré annonce).
+- **Ne jamais interrompre un sanitize en cours** sauf timeout >15min.
+- Consigner : modèle exact (ex : TS240GSSD220S), firmware (ex : R0510A0), et méthode utilisée (ex : sanitize partieller + security fallback).
+
+### L'exception « NVMe sans Sanitize/Format »
+
+Certains modèles OEM sont connus pour refuser sanitize/format malgré NVMe 1.2, mais acceptent TRIM/Write Zeroes + chiffrement interne.
+
+Ce cas concerne les SSD NVMe dont `sanicap = 0` (aucun type de sanitize supporté) et où `nvme format --ses=1/2` retourne `Access Denied (0x4286)`. Le SSD reste détecté mais refuse les commandes d'effacement standard.
+
+Cette exception s'applique lorsque :
+
+- `sudo nvme id-ctrl -H /dev/nvmeXnY` affiche `sanicap : 0` (Crypto/Block/Overwrite non supportés).
+- `sudo nvme format --ses=1/2` échoue avec `Access Denied: Access to the namespace and/or LBA range is denied due to lack of access rights(0x4286)`.
+- `sudo nvme sanitize /dev/nvmeXnY` retourne `Invalid Sanitize Action`.
+
+**Vérifier les capacités NVMe**
+
+Confirmer l'absence de sanitize et les capacités supportées :
+
+```bash
+sudo nvme id-ctrl -H /dev/nvme0n1 | grep -E "(sanicap|oacs|oncs)"
+```
+
+Résultat attendu : `sanicap : 0`, `oacs : 0x17` (Format NVM et Security Send/Receive supportés mais bloqués).
+
+Vérifier TRIM/Write Zeroes (souvent les seuls disponibles) :
+
+```bash
+sudo nvme id-ctrl -H /dev/nvme0n1 | grep oncs
+```
+
+Chercher `Write Zeroes Supported` et `Data Set Management Supported`.
+
+**Protocole TRIM + Write Zeroes (méthode principale)**
+
+Puisque sanitize/format sont refusés, utiliser les commandes NVMe de base supportées :
+
+Démonter toutes les partitions NVMe et identifier le namespace :
+
+```bash
+sudo umount /dev/nvme0n1p*
+sudo nvme list
+```
+
+Lancer un effacement par zéros NVMe (équivalent write zeroes sur tout le namespace) :
+
+```bash
+sudo nvme write-zeroes /dev/nvme0n1 --force -s 0 -l 100
+```
+
+(Remplit toutes les LBA avec des zéros, force l'usage de toutes les zones utilisateur).
+
+TRIM global sur le namespace non monté :
+
+```bash
+sudo nvme dsm-internal-log /dev/nvme0n1  # Vérifier DSM support
+sudo nvme dataset-manage -t 1 /dev/nvme0n1  # TRIM toutes les zones libres
+```
+
+**Variante stricte (remplissage + TRIM)**
+
+Si Write Zeroes n'est pas suffisant ou indisponible :
+
+Créer un système de fichiers temporaire :
+
+```bash
+sudo parted /dev/nvme0n1 mklabel gpt
+sudo parted /dev/nvme0n1 mkpart primary ext4 0% 100%
+sudo mkfs.ext4 -E discard /dev/nvme0n1p1
+sudo mkdir /mnt/nvme
+sudo mount /dev/nvme0n1p1 /mnt/nvme
+```
+
+Remplir complètement + TRIM :
+
+```bash
+sudo dd if=/dev/zero of=/mnt/nvme/fill.tmp bs=1G status=progress
+sudo rm /mnt/nvme/fill.tmp
+sudo fstrim -av /mnt/nvme
+sudo umount /mnt/nvme
+```
+
+**Vérification**
+
+Contrôler l'absence de données lisibles :
+
+```bash
+sudo nvme read /dev/nvme0n1 --start-block=0 --block-count=10 --data-size=5120 | hexdump -C
+```
+
+Les données doivent être aléatoires ou nulles (comportement chiffré interne).
+
+Vérifier SMART/usage après traitement :
+
+```bash
+sudo nvme smart-log /dev/nvme0n1
+sudo nvme list
+```
+
+L'utilisation doit refléter un disque « propre » (~0% utilisé).
+
+**Remarques importantes**
+
+- Ne jamais tenter `nvme sanitize` ou `nvme format --ses` sur ces modèles (erreur systématique).
+- Consigner : modèle exact (`PC401 NVMe SK hynix 256GB`), firmware (`80006E00`), et méthode utilisée (TRIM + Write Zeroes).
+- Si le disque persiste à refuser l'accès après redémarrage, appliquer la procédure **« Variante stricte (remplissage + TRIM) »** de la section **"Protocole TRIM sur SATA"** comme ci-dessous :
+
+```bash
+sudo dd if=/dev/zero of=/mnt/ssd/fill.tmp bs=1M status=progress
+```
+
